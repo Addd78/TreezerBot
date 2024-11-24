@@ -1,19 +1,26 @@
 import asyncio
 import os
 import json
+import re
 import random
 import aiohttp
+import requests
 from discord.ext import tasks
 import discord
+from discord import File
 from TikTokApi import TikTokApi
 from math import floor
+from bs4 import BeautifulSoup
 import traceback
 from discord.utils import get
 from discord.ui import View, Select
 from discord.ext import commands
+from discord import Button, ButtonStyle, Interaction
 from discord import VoiceChannel, Embed, PermissionOverwrite
 from datetime import datetime, timezone, timedelta
-
+log_channel_id = 1302716998983221298
+rankup_channel_id = 1302369087095046184
+ECONOMY_FILE = "economie.json"
 TOTO = ''
 debug = True
 SERVER = True
@@ -25,7 +32,7 @@ class PersistentViewBot(commands.Bot):
         super().__init__(command_prefix=commands.when_mentioned_or('CAS'), help_command=None, case_insensitive=True, intents=intents)
 
     async def setup_hook(self) -> None:
-        views = [RemoteButtonView(), ShopView()]
+        views = [RemoteButtonView(), CategorySelectView()]
         for element in views:
             self.add_view(element)
         
@@ -47,7 +54,13 @@ def run_bot(token=TOTO, debug=False):
 
 @bot.event
 async def on_ready():
-    check_for_free_games.start() 
+    try:
+        from bs4 import BeautifulSoup
+        print("BeautifulSoup est installé avec succès !")
+    except ModuleNotFoundError:
+        print("BeautifulSoup n'est pas installé.")
+
+    check_free_games.start()
     award_treezcoins_for_vc.start()
     check_temporary_roles.start()
     bot.loop.create_task(start_drops())
@@ -58,6 +71,30 @@ def load_emojis(filename='emojis.json'):
         return json.load(file)
 
 emojis = load_emojis()
+
+def load_game_state():
+    try:
+        with open(GAME_STATE_FILE, "r") as file:
+            return json.load(file)
+    except FileNotFoundError:
+        return {"current_games": []}
+
+def save_game_state(data):
+    with open(GAME_STATE_FILE, "w") as file:
+        json.dump(data, file, indent=4)
+
+def load_data_noel():
+    try:
+        with open("noel.json", "r") as file:
+            return json.load(file)
+    except FileNotFoundError:
+        return {}
+
+def save_data_noel(data):
+    with open("noel.json", "w") as file:
+        json.dump(data, file, indent=4)
+
+data = load_data_noel()
 
 def get_emoji(name):
     return emojis.get(name, '')
@@ -73,7 +110,58 @@ def save_ticket_data(file, data):
     with open(file, "w") as f:
         json.dump(data, f, indent=4)
 
-        
+def load_data_eco():
+    if os.path.exists(ECONOMY_FILE):
+        with open(ECONOMY_FILE, 'r') as file:
+            return json.load(file)
+    return {}
+
+def save_data_eco(data):
+    with open(ECONOMY_FILE, 'w') as file:
+        json.dump(data, file, indent=4)
+
+CONFIG_FILE = "state_raid.json"
+
+join_times = {}
+anti_join_enabled = {}
+
+def save_data_raid(data):
+    with open("join_times.json", "w") as f:
+        clean_data = {
+            guild_id: [time for time in times if isinstance(time, str) and time != "enabled"]
+            for guild_id, times in data.items()
+        }
+        json.dump(clean_data, f)
+
+
+def load_data_raid():
+    try:
+        with open("join_times.json", "r") as f:
+            data = json.load(f)
+            for guild_id, times in data.items():
+                data[guild_id] = [time for time in times if isinstance(time, str) and time != "enabled"]
+            return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+ANTI_JOIN_FILE = "anti_join_status.json"
+
+def load_anti_join_status():
+    """Charge l'état de l'anti-join depuis un fichier JSON."""
+    try:
+        with open(ANTI_JOIN_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("anti_join_active", False)
+    except FileNotFoundError:
+        return False
+
+def save_anti_join_status(status):
+    """Sauvegarde l'état de l'anti-join dans un fichier JSON."""
+    with open(ANTI_JOIN_FILE, "w") as f:
+        json.dump({"anti_join_active": status}, f)
+
+anti_join_active = load_anti_join_status()
 #################################### TICKETS  #############################################
 
 
@@ -81,12 +169,6 @@ def save_ticket_data(file, data):
 @discord.app_commands.checks.has_permissions(administrator=True)
 async def send_remote_button(interaction: discord.Interaction):
     """Envoyer l'embed des ticket + Bouton"""
-    staff_role = interaction.guild.get_role(1292930841286021210)
-    if staff_role not in interaction.user.roles:
-        embed = create_small_embed(f"Vous n'avez pas la permission d'utiliser cette commande {get_emoji('no')}")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-
     embed = discord.Embed(
         title=f"{get_emoji('krown')} Treezer Server Support !",
         description="Pour toutes demandes, veuiillez interagir avec le bouton ci-dessous puis indiquer la raison de vôtre demande"
@@ -144,7 +226,7 @@ class RemoteButtonView(discord.ui.View):
 
         await ticket_channel.send(embed=embed, view=action_view)
 
-        ticket_data_ = {
+        ticket_data = {
             "user_id": interaction.user.id,
             "channel_id": ticket_channel.id
         }
@@ -203,6 +285,18 @@ class TicketActionView(discord.ui.View):
                 del all_tickets[str(self.user_id)]
                 save_ticket_data("ticket.json", all_tickets)
 
+################### LOAD #########################
+
+def load_data(file):
+    try:
+        with open(file, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_data(file, data):
+    with open(file, "w") as f:
+        json.dump(data, f, indent=4)
 
 ############################# COMMANDS #######################################
 
@@ -230,61 +324,301 @@ async def ban(interaction: discord.Interaction, member: discord.Member, *, raiso
     await interaction.response.send_message(f"{get_emoji('yes_emoji')}", ephemeral=True)
 
 ################################# FONCTIONNALITEES #########################################
+############ ANTI RAID #################
+
+@bot.tree.command(name="lock_server", description="Verrouille le serveur pour les nouveaux membres")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def lock_server(interaction: discord.Interaction):
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message(
+            "Cette commande doit être exécutée dans un serveur.", ephemeral=True
+        )
+        return
+
+    try:
+        for channel in guild.text_channels:
+            overwrite = channel.overwrites_for(guild.default_role)
+            overwrite.send_messages = False
+            await channel.set_permissions(guild.default_role, overwrite=overwrite)
+
+        await interaction.response.send_message(
+            "🔒 Le serveur a été verrouillé avec succès. Les nouveaux membres ne peuvent pas envoyer de messages.",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ Une erreur est survenue lors du verrouillage : {e}",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="unlock_server", description="Déverrouille le serveur pour les nouveaux membres")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def unlock_server(interaction: discord.Interaction):
+    guild = interaction.guild
+
+    if not guild:
+        await interaction.response.send_message(
+            "Cette commande doit être exécutée dans un serveur.", ephemeral=True
+        )
+        return
+
+    try:
+        for channel in guild.text_channels:
+            overwrite = channel.overwrites_for(guild.default_role)
+            overwrite.send_messages = None
+            await channel.set_permissions(guild.default_role, overwrite=overwrite)
+
+        await interaction.response.send_message(
+            "🔓 Le serveur a été déverrouillé avec succès. Les nouveaux membres peuvent à nouveau envoyer des messages.",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ Une erreur est survenue lors du déverrouillage : {e}",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="anti_join_on", description="Active l'anti-join pour bloquer les nouveaux membres")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def anti_join_on(interaction: discord.Interaction):
+    global anti_join_active
+    anti_join_active = True
+    save_anti_join_status(anti_join_active)
+    await interaction.response.send_message(
+        "🔒 Anti-join activé ! Les nouveaux membres seront automatiquement expulsés.",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="anti_join_off", description="Désactive l'anti-join pour permettre les nouveaux membres")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def anti_join_off(interaction: discord.Interaction):
+    global anti_join_active
+    anti_join_active = False
+    save_anti_join_status(anti_join_active)
+    await interaction.response.send_message(
+        "🔓 Anti-join désactivé ! Les nouveaux membres peuvent rejoindre normalement.",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="enable_antiraid", description="Active le système Anti-Raid.")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def enable_antiraid(interaction: discord.Interaction):
+    guild_id = str(interaction.guild.id)
+
+    try:
+        config = load_data_raid()
+    except FileNotFoundError:
+        config = {}
+
+    config[guild_id] = {"enabled": True}
+
+    save_data_raid(config)
+
+    raid_channel = interaction.guild.get_channel(1306346010917867591)
+    if raid_channel:
+        await raid_channel.send("🚨 **Anti-Raid activé !** Toutes les activités suspectes seront signalées ici.")
+    
+    await interaction.response.send_message(
+        "Le système Anti-Raid a été activé avec succès ! 🚨",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="disable_antiraid", description="Désactive le système Anti-Raid.")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def disable_antiraid(interaction: discord.Interaction):
+    guild_id = str(interaction.guild.id)
+
+    try:
+        config = load_data_raid()
+    except FileNotFoundError:
+        config = {}
+
+    if guild_id in config:
+        config[guild_id]["enabled"] = False
+        save_data_raid(config)
+
+        raid_channel = interaction.guild.get_channel(1306346010917867591)
+        if raid_channel:
+            await raid_channel.send("❌ **Anti-Raid désactivé !** Les activités suspectes ne seront plus surveillées.")
+
+        await interaction.response.send_message(
+            "Le système Anti-Raid a été désactivé avec succès. ❌",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "Le système Anti-Raid n'était pas activé pour ce serveur.",
+            ephemeral=True
+        )
+
+
+async def trigger_raid_protection(guild, reason):
+    alert_channel = guild.get_channel(1306346010917867591)
+    if alert_channel:
+        await alert_channel.send(f"⚠️ Détection de RAID : {reason}. Le serveur est verrouillé temporairement.")
+
+    for channel in guild.text_channels:
+        overwrite = channel.overwrites_for(guild.default_role)
+        overwrite.send_messages = False
+        await channel.set_permissions(guild.default_role, overwrite=overwrite)
+
+    await asyncio.sleep(600)
+
+    for channel in guild.text_channels:
+        overwrite = channel.overwrites_for(guild.default_role)
+        overwrite.send_messages = None 
+        await channel.set_permissions(guild.default_role, overwrite=overwrite)
+        
+############## ANTI SPAM ################
+
+spam_data=load_data('spam.json')
+def get_timeout_duration(spam_count):
+    if spam_count == 1:
+        return timedelta(minutes=1)
+    elif spam_count == 2:
+        return timedelta(minutes=10)
+    elif spam_count == 3:
+        return timedelta(hours=1)
+    elif spam_count == 4:
+        return timedelta(hours=10)
+    elif spam_count == 5:
+        return timedelta(days=1)
+    else:
+        return timedelta(weeks=1)
+
+@bot.tree.command()
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def spam(interaction, member: discord.Member):
+    user_id = str(member.id)
+    spam_count = spam_data.get(user_id, 0)
+    is_timed_out = member.is_timed_out() 
+    timeout_status = "Oui" if is_timed_out else "Non"
+    
+    embed = discord.Embed(title="Informations sur le spam", color=discord.Color.blue())
+    embed.add_field(name="Membre", value=member.mention, inline=True)
+    embed.add_field(name="Nombre de spams", value=str(spam_count), inline=True)
+    embed.add_field(name="En timeout actuellement", value=timeout_status, inline=True)
+    await interaction.response.send_message(embed=embed)
+    
+
 ########### JEUX GRATUITS ##############
 
 FREE_GAMES_CHANNEL_ID = 1304515694620180542
-CHECK_INTERVAL = 3600
-detected_games = set()
+GAME_STATE_FILE = "game_state.json"
+
+
+EPIC_GAMES_URL = "https://store.epicgames.com/fr/free-games"
+
+@bot.tree.command(name="recup_games")
+async def recup_games(interaction):
+    """Commande pour récupérer les jeux gratuits Epic Games"""
+    try:
+        url = "https://store.epicgames.com/fr/free-games"
+        headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.5993.88 Safari/537.36",
+    "Accept-Language": "fr-FR,fr;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Upgrade-Insecure-Requests": "1"
+}
+
+        response = requests.get(url, headers=headers)
+
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        games = soup.find_all("div", class_="css-1myhtyb")
+
+        if not games:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="❌ Aucun jeu trouvé",
+                    description="Impossible de récupérer les jeux gratuits pour le moment. Réessayez plus tard.",
+                    color=discord.Color.red(),
+                ),
+                ephemeral=True,
+            )
+            return
+
+        for game in games[:2]:
+            title = game.find("span", class_="css-2ucwu").text.strip()
+            availability = game.find("span", class_="css-119zqjf").text.strip()
+            period = game.find("span", class_="css-1sclytn").text.strip() if game.find("span", class_="css-1sclytn") else "Non disponible"
+
+            embed = discord.Embed(
+                title=f"🎮 {title}",
+                description=f"Disponibilité : **{availability}**\nPériode : **{period}**",
+                color=discord.Color.blue(),
+            )
+            image_url = game.find("img")["src"] if game.find("img") else None
+            if image_url:
+                embed.set_image(url=image_url)
+
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    except Exception as e:
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                title="❌ Erreur",
+                description=f"Une erreur est survenue lors de la récupération des jeux : {e}",
+                color=discord.Color.red(),
+            ),
+            ephemeral=True,
+        )
 
 async def fetch_free_games():
-    url = "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions"
-    
     async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            if response.status == 200:
-                data = await response.json()
-                games = []
-                for game in data['data']['Catalog']['searchStore']['elements']:
-                    if game['promotions']:
-                        for promotion in game['promotions']['promotionalOffers']:
-                            if promotion['promotionalOffers']:
-                                games.append({
-                                    "title": game['title'],
-                                    "description": game['description'],
-                                    "thumbnail": game['keyImages'][0]['url'],
-                                    "url": f"https://www.epicgames.com/store/fr/p/{game['productSlug']}"
-                                })
-                return games
-            else:
-                print(f"Erreur lors de la requête API : {response.status}")
-                return []
+        async with session.get(EPIC_GAMES_URL) as response:
+            html = await response.text()
+            soup = BeautifulSoup(html, "html.parser")
 
-async def check_new_free_games():
+            free_games = []
+            game_containers = soup.find_all("div", class_="css-1myhtyb")
+            for container in game_containers[:2]:
+                title = container.find("span", class_="css-2ucwu").text
+                status = container.find("div", class_="css-1txuvy0").text.strip()
+                period = container.find("div", class_="css-15g5ncy").text if status == "Gratuit" else None
+
+                free_games.append({
+                    "title": title,
+                    "status": status,
+                    "period": period
+                })
+
+            return free_games
+
+@tasks.loop(hours=1)
+async def check_free_games():
+    current_state = load_game_state()
+
     free_games = await fetch_free_games()
-    channel = bot.get_channel(FREE_GAMES_CHANNEL_ID)
-    
-    for game in free_games:
-        game_id = game["title"]
-        if game_id not in detected_games:
-            detected_games.add(game_id)
-            
-            embed = discord.Embed(
-                title=game["title"],
-                description=game["description"],
-                color=discord.Color.blue()
-            )
-            embed.set_image(url=game["thumbnail"])
-            embed.add_field(name="Lien", value=f"[Voir sur Epic Games Store]({game['url']})", inline=False)
-            
-            await channel.send(embed=embed)
 
-@tasks.loop(seconds=CHECK_INTERVAL)
-async def check_for_free_games():
-    await check_new_free_games()
+    new_games = []
+    for game in free_games:
+        if game["title"] not in current_state["current_games"]:
+            new_games.append(game)
+            current_state["current_games"].append(game["title"])
+
+    save_game_state(current_state)
+
+    channel = bot.get_channel(FREE_GAMES_CHANNEL_ID)
+    for game in new_games:
+        description = f"Statut : {game['status']}\n"
+        if game["period"]:
+            description += f"Disponible du {game['period']}"
+        else:
+            description += "Non disponible pour le moment."
+        embed = Embed(
+            title=f"🎮 {game['title']}",
+            description=description,
+            color=0x00ff00 if game["status"] == "Gratuit" else 0xff0000
+        )
+        await channel.send(embed=embed)
 
 ################ VOC #################
 
-TREEZCOINS_REWARD = 35
+TREEZCOINS_REWARD = 80
 CHECK_INTERVAL = 60
 MINUTES_THRESHOLD = 5
 GUILD_ID = 1272525476103065733
@@ -488,7 +822,7 @@ class Drop(discord.ui.View):
 
 async def start_drops():
     while True:
-        await asyncio.sleep(random.randint(7200, 84600))
+        await asyncio.sleep(random.randint(36000, 64800))
         await launch_drop()
 
 async def launch_drop():
@@ -519,11 +853,111 @@ async def forcedrop(interaction):
     await launch_drop()
     await interaction.response.send_message("Drop forcé lancé avec succès !", ephemeral=True)
 
+user_messages = {}
+economy_data = load_data_eco()
+
+@bot.tree.command(name="reset")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def reset(interaction, user: discord.User):
+    user_id = str(user.id)
+    economy_data = load_data_eco()
+
+    if user_id in economy_data:
+        economy_data[user_id] = {"coins": 0, "xp": 0, "level": 0}
+        save_data_eco(economy_data)
+        await interaction.response.send_message(f"Les statistiques de {user.mention} ont été réinitialisées à 0.")
+    else:
+        await interaction.response.send_message(f"{user.mention} n'a pas de statistiques enregistrées.")
+
+link_pattern = re.compile(r"(https?://|www\.)\S+")
+raid_alert_threshold = {
+    "joins": 5,
+    "messages": 10,
+    "time_window_joins": timedelta(minutes=1),
+    "time_window_messages": 7
+}
+
+join_history = {}
+message_counts = {} 
 
 
+@bot.event
+async def on_message(message):
+    await bot.process_commands(message)
 
+    if message.author.bot:
+        return 
+    exempt_roles = [
+        1292930841286021210, 1292931666377179258, 1301602510557020190,
+        1292931931050348574, 1292936072095076456, 1292935044901371924
+    ]
 
-ECONOMY_FILE = "economie.json"
+    user_id = message.author.id
+    guild_id = message.guild.id
+    now = datetime.utcnow()
+
+    if guild_id not in message_counts:
+        message_counts[guild_id] = {}
+    if user_id not in message_counts[guild_id]:
+        message_counts[guild_id][user_id] = []
+
+    message_counts[guild_id][user_id].append(now)
+
+    message_counts[guild_id][user_id] = [
+        msg_time for msg_time in message_counts[guild_id][user_id]
+        if now - msg_time < timedelta(seconds=raid_alert_threshold["time_window_messages"])
+    ]
+
+    if len(message_counts[guild_id][user_id]) > raid_alert_threshold["messages"]:
+        await trigger_raid_protection(message.guild, f"Spamming détecté par {message.author.mention}")
+        await message.author.ban(reason="Détection de raid : spam de messages")
+        message_counts[guild_id][user_id] = []
+
+    if link_pattern.search(message.content):
+        if not any(role.id in exempt_roles for role in message.author.roles):
+            log_channel = bot.get_channel(1301664284102758430)
+            try:
+                await message.author.timeout(timedelta(hours=1), reason="Lien détecté")
+            except discord.Forbidden:
+                pass
+
+            embed = discord.Embed(title="Lien détecté et supprimé", color=discord.Color.red())
+            embed.add_field(name="Membre", value=message.author.mention, inline=True)
+            embed.add_field(name="Action", value="Timeout de 1 heure", inline=False)
+            embed.add_field(name="Message supprimé", value=message.content, inline=False)
+            await log_channel.send(embed=embed)
+            await message.delete()
+
+    user_id = str(message.author.id)
+    now = datetime.utcnow()
+    user_messages[user_id] = [msg_time for msg_time in user_messages.get(user_id, []) if now - msg_time < timedelta(minutes=1)]
+    user_messages[user_id].append(now)
+
+    if len(user_messages[user_id]) >= 10:
+        spam_data[user_id] = spam_data.get(user_id, 0) + 1
+        timeout_duration = get_timeout_duration(spam_data[user_id])
+
+        try:
+            await message.author.timeout(timeout_duration, reason="Spam détecté")
+        except discord.Forbidden:
+            pass
+
+        log_channel = bot.get_channel(1301664792586752051)
+        embed = discord.Embed(title="Action anti-spam", color=discord.Color.red())
+        embed.add_field(name="Membre", value=message.author.mention, inline=True)
+        embed.add_field(name="Raison", value=f"Spam détecté (10 messages en moins d'une minute)", inline=False)
+        embed.add_field(name="Action", value=f"Timeout de {timeout_duration}", inline=False)
+        embed.add_field(name="Nombre de spams", value=str(spam_data[user_id]), inline=False)
+        await log_channel.send(embed=embed)
+
+        user_messages[user_id] = []
+        save_data_eco(spam_data, "spam.json")
+
+    user_data = economy_data.get(user_id, {"coins": 0, "xp": 0, "level": 1})
+    user_data["coins"] += 120
+    economy_data[user_id] = user_data
+    await update_level(message.author, user_data)
+    save_data_eco(economy_data)
 roles = {
     1: 1298591387469484073,
     10: 1298591387477999668,
@@ -532,177 +966,193 @@ roles = {
     75: 1298592077713768448,
     100: 1298592254184656896,
 }
-shop_items = {
-    "5000": {"price": 5000, "xp": 550},
-    "11000": {"price": 11000, "xp": 1150},
-    "35000": {"price": 35000, "role_id": 1301225106990694455},
-    "80000": {"price": 80000, "ticket_category_id": 1299809436550041673},
-    "100000": {"price": 100000, "role_id": 1300097097814507542, "duration": 604800}
-}
-user_messages = {}
-log_channel_id = 1302716998983221298
-rankup_channel_id = 1302369087095046184
-
-def load_data():
-    if os.path.exists(ECONOMY_FILE):
-        with open(ECONOMY_FILE, 'r') as file:
-            return json.load(file)
-    return {}
-
-def save_data(data):
-    with open(ECONOMY_FILE, 'w') as file:
-        json.dump(data, file, indent=4)
-
-economy_data = load_data()
-
-@bot.event
-async def on_message(message):
-    await bot.process_commands(message)
-
-    if message.author.bot:
-        return
-
-    user_id = str(message.author.id)
-    now = datetime.utcnow()
-
-    user_messages[user_id] = [msg_time for msg_time in user_messages.get(user_id, []) if now - msg_time < timedelta(minutes=1)]
-    user_messages[user_id].append(now)
-
-    if len(user_messages[user_id]) >= 10:
-        try:
-            await message.author.timeout(timedelta(seconds=60), reason="Spam détecté")
-        except discord.Forbidden:
-            pass
-        log_channel = bot.get_channel(1301664792586752051)
-        embed = discord.Embed(title="Action anti-spam", color=discord.Color.red())
-        embed.add_field(name="Membre", value=message.author.mention, inline=True)
-        embed.add_field(name="Raison", value="Spam détecté (10 messages en moins d'une minute)", inline=False)
-        embed.add_field(name="Action", value="Timeout de 60 secondes", inline=False)
-        await log_channel.send(embed=embed)
-        user_messages[user_id] = []
-
-    user_data = economy_data.get(user_id, {"coins": 0, "xp": 0, "level": 1})
-    user_data["coins"] += 75
-    economy_data[user_id] = user_data
-    await update_level(message.author, user_data)
-    save_data(economy_data)
 
 async def update_level(member, user_data):
     xp_needed = 1000
+
     while user_data["xp"] >= xp_needed:
         user_data["level"] += 1
         user_data["xp"] -= xp_needed
-        xp_needed = 1000 * user_data["level"]
-        
-        embed = discord.Embed(
-            title=f"🎉 Rankup",
-            description=f"Félicitations à {member.mention} ! Vous avez atteint le niveau {user_data['level']} !",
-            color=0x131fd1
-        )
-        file = discord.File("update_level_banner.png", filename="update_level_banner.png")
-        embed.set_image(url="attachment://update_level_banner.png")
+        economy_data = load_data_eco()
+        economy_data[str(member.id)] = user_data
+        save_data_eco(economy_data)
 
         if user_data["level"] in roles:
             role = member.guild.get_role(roles[user_data["level"]])
             if role and role not in member.roles:
                 await member.add_roles(role)
+                embed = Embed(
+                    title="🎉 Rankup",
+                    description=f"Félicitations à {member.mention} ! Vous avez atteint le niveau {user_data['level']} !",
+                    color=0x131fd1
+                )
+                file = File("update_level_banner.png", filename="update_level_banner.png")
+                embed.set_image(url="attachment://update_level_banner.png")
 
-        rankup_channel = member.guild.get_channel(rankup_channel_id)
-        if rankup_channel:
-            await rankup_channel.send(embed=embed, file=file)
+                rankup_channel = member.guild.get_channel(rankup_channel_id)
+                await rankup_channel.send(embed=embed, file=file)
 
-        log_channel = member.guild.get_channel(log_channel_id)
-        if log_channel:
-            log_embed = discord.Embed(
-                title="Nouveau Rankup",
-                description=f"{member.mention} est passé au niveau {user_data['level']}.",
-                color=discord.Color.green()
-            )
-            await log_channel.send(embed=log_embed)
-
+                log_channel = member.guild.get_channel(log_channel_id)
+                if log_channel:
+                    log_embed = Embed(
+                        title="Nouveau Rankup",
+                        description=f"{member.mention} est passé au niveau {user_data['level']}.",
+                        color=discord.Color.green()
+                    )
+                    await log_channel.send(embed=log_embed)
     
 @bot.tree.command(name="rankup", description="Améliorez votre niveau si vous avez assez d'XP.")
 async def rankup(interaction):
     user_id = str(interaction.user.id)
-    user_data = economy_data.get(user_id, {"coins": 0, "xp": 0, "level": 1})
+    user_data = economy_data.get(user_id, {"coins": 0, "xp": 0, "level": 0})
     if user_data["xp"] >= 1000:
         await update_level(interaction.user, user_data)
         economy_data[user_id] = user_data
-        save_data(economy_data)
+        save_data_eco(economy_data)
         embed = discord.Embed(description="Vous avez amélioré votre niveau avec succès !", color=discord.Color.green())
         await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
         embed = discord.Embed(description="Vous n'avez pas assez d'XP pour passer au niveau suivant.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-class ShopView(View):
+ECONOMY_FILE = "economie.json"
+CATEGORY_CHANNEL_ID = 1305234992896540774
+
+categories = {
+    "animation": {
+        "Choix animation": {"price": 25000, "role_id": 1305203860117258361},
+        "Pass prioritaire": {"price": 20000, "role_id": 1305204544149393439},
+        "Animation entre VIP": {"price": 50000, "role_id": 1305204084093091942}
+    },
+    "roles": {
+        "L'ancien en personne": {"price": 75000, "role_id": 1305200094231924736},
+        "le/a sous goat du serveur": {"price": 50000, "role_id": 1305200344380215346},
+        "la famille": {"price": 35000, "role_id": 1305200474462617692},
+        "le/a reuf du serveur": {"price": 25000, "role_id": 1305200584457981974}
+    },
+    "xp": {
+        "550 XP": {"price": 5000, "xp": 550},
+        "1150 XP": {"price": 11000, "xp": 1150},
+        "2500 XP": {"price": 20000, "xp": 2500},
+        "5000 XP": {"price": 35000, "xp": 5000},
+        "7000 XP": {"price": 50000, "xp": 7000}
+    },
+    "concept": {
+        "Choisir un concept": {"price": 40000, "role_id": 1301225106990694455},
+        "Jury avec Treezer": {"price": 50000, "role_id": 1305202855267012648},
+        "Jeux avec Treezer": {"price": 55000, "role_id": 1305202680573984788},
+        "Choix jeux": {"price": 25000, "role_id": 1305202984111702026}
+    }
+}
+
+class CategorySelectView(View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(ShopSelect())
+        self.add_item(CategorySelect())
 
-class ShopSelect(Select):
+class CategorySelect(Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="550 XP", description="5000 TreezCoins", value="5000"),
-            discord.SelectOption(label="1150 XP", description="11000 TreezCoins", value="11000"),
-            discord.SelectOption(label="Pass Concept", description="35000 TreezCoins", value="35000"),
-            discord.SelectOption(label="Choix d'évènement", description="80000 TreezCoins", value="80000"),
-            discord.SelectOption(label="PASS VIP (1 semaine)", description="100000 TreezCoins", value="100000")
+            discord.SelectOption(label="Animation hors live", value="animation"),
+            discord.SelectOption(label="Roles", value="roles"),
+            discord.SelectOption(label="XP", value="xp"),
+            discord.SelectOption(label="Concept", value="concept"),
         ]
-        super().__init__(placeholder="Choisissez une option...", min_values=1, max_values=1, options=options, custom_id="shop_select")
+        super().__init__(placeholder="Choisissez une catégorie...", min_values=1, max_values=1, options=options, custom_id="category_select")
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_category = self.values[0]
+        embed = discord.Embed(title=f"Shop - {selected_category.capitalize()}",
+                              description=f"Sélectionnez un article dans la catégorie **{selected_category.capitalize()}** {get_emoji('whitefire')}",
+                              color=0xbd2bda)
+        await interaction.response.send_message(embed=embed, view=ItemSelectView(selected_category), ephemeral=True)
+
+class ItemSelectView(View):
+    def __init__(self, category):
+        super().__init__(timeout=None)
+        self.add_item(ItemSelect(category))
+
+class ItemSelect(Select):
+    def __init__(self, category):
+        options = [
+            discord.SelectOption(label=item_name, description=f"{item_data['price']} TreezCoins 🪙", value=item_name)
+            for item_name, item_data in categories[category].items()
+        ]
+        super().__init__(placeholder="Choisissez un article...", min_values=1, max_values=1, options=options, custom_id="item_select")
+        self.category = category
 
     async def callback(self, interaction: discord.Interaction):
         user_id = str(interaction.user.id)
+        item_name = self.values[0]
+        item = categories[self.category][item_name]
+
+        economy_data = load_data_eco()
         user_data = economy_data.get(user_id, {"coins": 0, "xp": 0, "level": 1})
-        choice = self.values[0]
-        item = shop_items[choice]
+        user_coins_before = user_data["coins"]
 
         if user_data["coins"] >= item["price"]:
             user_data["coins"] -= item["price"]
+
             if "xp" in item:
                 user_data["xp"] += item["xp"]
                 await update_level(interaction.user, user_data)
-                embedachat = discord.Embed(description=f"Vous avez acheté {item['xp']} XP pour {item['price']} TreezCoins.", color=discord.Color.green())
+                embedachat = discord.Embed(
+                    title="Achat Réussi",
+                    description=f"Vous avez acheté **{item_name}** pour {item['price']} TreezCoins !\nVous avez gagné {item['xp']} XP. {get_emoji('star')}",
+                    color=0xbd2bda
+                )
                 await interaction.response.send_message(embed=embedachat, ephemeral=True)
             elif "role_id" in item:
                 role = interaction.guild.get_role(item["role_id"])
                 if role:
                     await interaction.user.add_roles(role)
-                    embedachat = discord.Embed(description=f"Vous avez acheté un rôle pour {item['price']} TreezCoins.", color=discord.Color.green())
+                    embedachat = discord.Embed(
+                        title="Achat Réussi",
+                        description=f"Vous avez acheté le rôle **{item_name}** pour {item['price']} TreezCoins {get_emoji('krown')}!",
+                        color=0xbd2bda
+                    )
                     await interaction.response.send_message(embed=embedachat, ephemeral=True)
-            elif "ticket_category_id" in item:
-                category = interaction.guild.get_channel(item["ticket_category_id"])
-                if category:
-                    overwrites = {
-                        interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                        interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, read_message_history=True),
-                        interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-                    }
-                    await category.create_text_channel(f"ticket-{interaction.user.display_name}", overwrites=overwrites)
-                    await interaction.response.send_message("Vous avez ouvert un ticket d'événement.", ephemeral=True)
 
             economy_data[user_id] = user_data
-            save_data(economy_data)
+            save_data_eco(economy_data)
+
+            log_channel = interaction.guild.get_channel(CATEGORY_CHANNEL_ID)
+            if log_channel:
+                log_embed = discord.Embed(
+                    title="Log d'Achat dans le Shop",
+                    color=0xbd2bda
+                )
+                log_embed.add_field(name="Membre", value=interaction.user.mention, inline=False)
+                log_embed.add_field(name="Article", value=item_name, inline=True)
+                log_embed.add_field(name="Prix", value=f"{item['price']} TreezCoins", inline=True)
+                log_embed.add_field(name="Solde avant achat", value=f"{user_coins_before} TreezCoins", inline=True)
+                log_embed.add_field(name="Solde après achat", value=f"{user_data['coins']} TreezCoins", inline=True)
+                log_embed.add_field(name="Date", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), inline=False)
+                await log_channel.send(embed=log_embed)
         else:
-            embedachat = discord.Embed(description="Vous n'avez pas assez de TreezCoins pour cet item.", color=discord.Color.red())
+            embedachat = discord.Embed(
+                title="Achat Refusé ❕",
+                description=f"Vous n'avez pas assez de TreezCoins pour cet article. {get_emoji('no')}",
+                color=0xbd2bda
+            )
             await interaction.response.send_message(embed=embedachat, ephemeral=True)
 
-@bot.tree.command(name="treezcoins", description="Affiche vos informations TreezCoins.")
+@bot.tree.command(name="shop")
+async def shop(interaction):
+    embed = discord.Embed(
+        title="Bienvenue dans le Shop",
+        description="Sélectionnez une catégorie d'articles à acheter :",
+        color=0xbd2bda
+    )
+    await interaction.response.send_message(embed=embed, view=CategorySelectView())
+
+@bot.tree.command(name="treezcoins")
 async def treezcoins(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
-    
-    try:
-        with open('economie.json', 'r') as f:
-            economy_data = json.load(f)
-    except FileNotFoundError:
-        economy_data = {}
+    economy_data = load_data_eco()
+    user_data = economy_data.get(user_id, {"coins": 0, "xp": 0, "level": 0})
 
-    if user_id in economy_data:
-        user_data = economy_data[user_id]
-    else:
-        user_data = {"coins": 0, "xp": 0, "level": 0}
-
-    embed = discord.Embed(title="Vos informations TreezCoins", color=0x00ff00)
+    embed = Embed(title="Vos informations TreezCoins", color=0x00ff00)
     embed.add_field(name="TreezCoins", value=f"{user_data['coins']} coins 🪙", inline=False)
     embed.add_field(name="XP", value=f"{user_data['xp']} XP 💥", inline=False)
     embed.add_field(name="Niveau", value=f"Niveau {user_data['level']} 🔢", inline=False)
@@ -720,13 +1170,7 @@ async def check_temporary_roles():
             if user and role:
                 await user.remove_roles(role)
             del economy_data["temporary_roles"][user_id]
-    save_data(economy_data)
-    
-@bot.tree.command()
-@discord.app_commands.checks.has_permissions(administrator=True)
-async def shop(interaction):
-    embed = discord.Embed(title="TreezCoins Shop", description="Choisissez une option pour acheter des récompenses avec vos TreezCoins !", color=0x00ff00)
-    await interaction.response.send_message(embed=embed, view=ShopView()) 
+    save_data_eco(economy_data)
     
 @bot.tree.command(name="treezinfo", description="Affiche les informations TreezCoins d'un membre.")
 @discord.app_commands.checks.has_permissions(administrator=True)
@@ -753,7 +1197,178 @@ async def treezinfo(interaction: discord.Interaction, member: discord.Member):
     embed.add_field(name="Niveau", value=f"Niveau {user_data['level']}", inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+##################### NOEL ###########################
+
+REWARDS = {
+    1: {"xp": 1000},
+    2: {"treezcoins": 1000},
+    3: {"xp": 200},
+    4: {"treezcoins": 1000},
+    5: {"roles": [1307457111445344377]},
+    6: {"xp": 300},
+    7: {"treezcoins": 1250},
+    8: {"xp": 300},
+    9: {"treezcoins": 1250},
+    10: {"xp": 500, "treezcoins": 2500},
+    11: {"xp": 400},
+    12: {"treezcoins": 1500},
+    13: {"xp": 400},
+    14: {"treezcoins": 500},
+    15: {"chance_roles": {1305203860117258361: 20}, "roles": [1307457581203066932]},
+    16: {"xp": 500},
+    17: {"treezcoins": 2000},
+    18: {"xp": 500},
+    19: {"treezcoins": 2000},
+    20: {"xp": 1000, "treezcoins": 3000, "roles": [1307458296101212180]},
+    21: {"xp": 600},
+    22: {"treezcoins": 2500},
+    23: {"xp": 600},
+    24: {"treezcoins": 2500},
+    25: {"xp": 2000, "treezcoins": 5000, "chance_roles": {1305202855267012648: 10}, "roles": [1307458521335468153]}
+}
+
+async def handle_rewards(member: discord.Member, day: int):
+    if str(member.id) not in data:
+        data[str(member.id)] = {"claimed": [], "xp": 0, "treezcoins": 0, "level": 1}
+
+    if day in data[str(member.id)]["claimed"]:
+        embed = discord.Embed(
+            description=f"🎄 Vous avez déjà récupéré la récompense pour le jour {day}.",
+            color=discord.Color.red()
+        )
+        return embed
+
+    current_date = datetime.utcnow().day
+    if current_date != day:
+        embed = discord.Embed(
+            description=f"⏳ Ce n'est pas encore le jour {day} ! Reviens le bon jour pour récupérer ta récompense.",
+            color=discord.Color.orange()
+        )
+        return embed
+
+    reward = REWARDS.get(day, {})
+    response_message = f"🎁 **Récompense du jour {day}** 🎁\n"
+
+    user_data = load_data_eco().get(str(member.id), {"xp": 0, "level": 1})
     
+    if "xp" in reward:
+        xp = reward["xp"]
+        user_data["xp"] += xp
+        response_message += f"🧠 +{xp} XP\n"
+
+    if "treezcoins" in reward:
+        coins = reward["treezcoins"]
+        user_data["treezcoins"] = user_data.get("treezcoins", 0) + coins
+        response_message += f"💰 +{coins} Treezcoins\n"
+
+    if "roles" in reward:
+        for role_id in reward["roles"]:
+            role = member.guild.get_role(role_id)
+            if role:
+                await member.add_roles(role)
+                response_message += f"📜 Rôle ajouté : {role.name}\n"
+
+    if "chance_roles" in reward:
+        for role_id, chance in reward["chance_roles"].items():
+            role = member.guild.get_role(role_id)
+            if role:
+                if random.randint(1, 100) <= chance:
+                    await member.add_roles(role)
+                    response_message += f"🍀 Félicitations ! Vous avez obtenu le rôle : {role.name}\n"
+                else:
+                    response_message += f"❌ Pas de chance ! Vous n'avez pas obtenu le rôle spécial.\n"
+
+    await update_level(member, user_data)
+
+    data[str(member.id)]["claimed"].append(day)
+    save_data_noel(data)
+    save_data_eco(user_data)
+
+    embed = discord.Embed(description=response_message, color=discord.Color.green())
+    return embed
+
+class AdventCalendarView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(AdventButton())  # Ajoute le bouton principal
+
+
+class AdventButton(Button):
+    def __init__(self):
+
+        super().__init__(
+            label="Récupérer la récompense",
+            style=ButtonStyle.red,
+            custom_id="advent_claim"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        # Chargement des données
+        day = datetime.utcnow().day
+        member = interaction.user
+        data = load_data_noel()
+        economy_data = load_data_eco()
+        
+        # Initialiser les données de l'utilisateur si elles n'existent pas
+        if str(member.id) not in economy_data:
+            economy_data[str(member.id)] = {"xp": 0, "treezcoins": 0, "level": 1}
+
+        # Vérifier si la récompense a déjà été récupérée
+        if str(member.id) in data and day in data[str(member.id)]["claimed"]:
+            await interaction.response.send_message(
+                embed=Embed(
+                    description=f"⏳ Vous avez déjà récupéré votre récompense pour le jour {day} !",
+                    color=discord.Color.red()
+                ),
+                ephemeral=True
+            )
+            return
+
+        # Vérifier si le jour actuel a une récompense
+        if day not in REWARDS:
+            await interaction.response.send_message(
+                embed=Embed(
+                    description="🎁 Pas de récompense disponible aujourd'hui. Revenez un autre jour !",
+                    color=discord.Color.orange()
+                ),
+                ephemeral=True
+            )
+            return
+
+        # Appliquer les récompenses
+        reward_embed = await handle_rewards(member, day)
+        await interaction.response.send_message(embed=reward_embed, ephemeral=True)
+
+@bot.tree.command(name="calendrier", description="Afficher le calendrier de l'avent.")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def send_calendrier(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🎄 Calendrier de l'Avent 🎄",
+        description="Clique sur le bouton ci-dessous pour récupérer ta récompense du jour. 🧑‍🎄",
+        color=discord.Color.green()
+    )
+    file = discord.File("sapin_noel.png", filename="sapin_noel.png")
+    embed.set_image(url="attachment://sapin_noel.png")
+
+    view = discord.ui.View()
+    view.add_item(
+        discord.ui.Button(label=f"Récupérer la récompense 🍭", style=discord.ButtonStyle.green, custom_id="claim_reward")
+    )
+
+    await interaction.response.send_message(embed=embed, view=view, file=file)
+
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    if "custom_id" not in interaction.data:
+        return
+
+    custom_id = interaction.data["custom_id"]
+    if custom_id == "claim_reward":
+        current_day = datetime.utcnow().day
+        reward_embed = await handle_rewards(interaction.user, current_day)
+        await interaction.response.send_message(embed=reward_embed, ephemeral=True)
+
 ############ VOCAUX TEMPO ##############
 
 VOICE_TRIGGER_CHANNEL_ID = 1301145722296602705
@@ -845,81 +1460,57 @@ log_channel_coins_id = 1301098651678019584
 rankup_channel_id = 1302369087095046184
 log_channel_xp_id = 1302716998983221298
 
-@bot.tree.command(name="addcoins", description="Ajouter des TreezCoins à un membre.")
+@bot.tree.command(name="addcoins")
 @discord.app_commands.checks.has_permissions(administrator=True)
 async def addcoins(interaction: discord.Interaction, member: discord.Member, quantité: int):
     if quantité <= 0:
         await interaction.response.send_message("La quantité de TreezCoins doit être positive.", ephemeral=True)
         return
 
+    economy_data = load_data_eco()
     user_id = str(member.id)
-    user_data = economy_data.get(user_id, {"coins": 0, "xp": 0, "level": 1})
+    user_data = economy_data.get(user_id, {"coins": 0, "xp": 0, "level": 0})
+
     user_data["coins"] += quantité
     economy_data[user_id] = user_data
-    save_data(economy_data)
+    save_data_eco(economy_data)
 
-    log_channel = bot.get_channel(log_channel_coins_id)
-    embed_log = discord.Embed(
+    log_channel = bot.get_channel(log_channel_id)
+    embed_log = Embed(
         title="Ajout de TreezCoins",
         description=f"{interaction.user.mention} a ajouté {quantité} TreezCoins à {member.mention}.",
         color=discord.Color.blue()
     )
     await log_channel.send(embed=embed_log)
-
     await interaction.response.send_message(f"{quantité} TreezCoins ajoutés à {member.mention}.", ephemeral=True)
 
-@bot.tree.command(name="addxp", description="Ajouter de l'XP à un membre.")
+@bot.tree.command(name="addxp")
+@discord.app_commands.checks.has_permissions(administrator=True)
 async def addxp(interaction: discord.Interaction, member: discord.Member, quantité: int):
     if quantité <= 0:
         await interaction.response.send_message("La quantité d'XP doit être positive.", ephemeral=True)
         return
 
+    economy_data = load_data_eco()
     user_id = str(member.id)
-    user_data = economy_data.get(user_id, {"coins": 0, "xp": 0, "level": 1})
-    initial_xp = user_data["xp"]
+    user_data = economy_data.get(user_id, {"coins": 0, "xp": 0, "level": 0})
+
     initial_level = user_data["level"]
-
     user_data["xp"] += quantité
+    await update_level(member, user_data)
 
-    xp_total = user_data["xp"]
-    levels_gained = floor(xp_total / 1000)
-    remaining_xp = xp_total % 1000
-
-    user_data["level"] += levels_gained
-    user_data["xp"] = remaining_xp
-
-    economy_data[user_id] = user_data
-    save_data(economy_data)
-
-    rankup_channel = bot.get_channel(rankup_channel_id)
-    for level in range(initial_level + 1, user_data["level"] + 1):
-        embed_rankup = discord.Embed(
-            title=f"🎉 Rankup",
-            description=f"Félicitations à {member.mention} ! Vous avez atteint le niveau {level} !",
-            color=0x131fd1
+    log_channel = bot.get_channel(log_channel_id)
+    if log_channel:
+        embed_log = Embed(
+            title="Ajout d'XP",
+            description=(f"{interaction.user.mention} a ajouté {quantité} XP à {member.mention}.\n"
+                         f"Level initial: {initial_level}\nLevel actuel: {user_data['level']}"),
+            color=discord.Color.green()
         )
-        file = discord.File("update_level_banner.png", filename="update_level_banner.png")
-        embed_rankup.set_image(url="attachment://update_level_banner.png")
-        await rankup_channel.send(embed=embed_rankup, file=file)
+        await log_channel.send(embed=embed_log)
 
-    log_channel = bot.get_channel(log_channel_xp_id)
-    embed_log = discord.Embed(
-        title="Ajout d'XP",
-        description=(
-            f"{interaction.user.mention} a ajouté {quantité} XP à {member.mention}.\n"
-            f"XP initial: {initial_xp}\n"
-            f"XP actuel: {user_data['xp']}\n"
-            f"Level initial: {initial_level}\n"
-            f"Level actuel: {user_data['level']}"
-        ),
-        color=discord.Color.green()
-    )
-    await log_channel.send(embed=embed_log)
+    await interaction.response.send_message(f"{quantité} XP ajoutés à {member.mention}.", ephemeral=True)
 
-    await interaction.response.send_message(
-        f"{quantité} XP ajoutés à {member.mention}. {levels_gained} niveaux gagnés." if levels_gained > 0 else f"{quantité} XP ajoutés à {member.mention}.",
-        ephemeral=True
-    )
     
 ################### MODERATION #################
 
@@ -1042,8 +1633,47 @@ async def on_member_remove(member):
     
     await log_channel.send(embed=embed)
 
+join_times = load_data("state_raid.json")
+guild=discord.guild
+
+
 @bot.event
 async def on_member_join(member):
+    if anti_join_active:
+        try:
+            await member.kick(reason="Anti-join activé : Les nouveaux membres sont bloqués.")
+            log_channel = member.guild.get_channel(1306346010917867591)
+            if log_channel:
+                await log_channel.send(f"🚨 {member.mention} a été expulsé automatiquement en raison de l'anti-join.")
+        except Exception as e:
+            print(f"Erreur lors de l'expulsion de {member.name}: {e}")
+    guild_id = str(member.guild.id)
+    current_time = datetime.utcnow()
+
+    if anti_join_enabled.get(guild_id, False):
+        log_channel = member.guild.get_channel(1306346010917867591)
+        if log_channel:
+            await log_channel.send(f"❌ {member.mention} a tenté de rejoindre, mais les adhésions sont désactivées.")
+        return
+
+    if guild_id not in join_times:
+        join_times[guild_id] = []
+    
+    join_times[guild_id] = [
+    time for time in join_times[guild_id]
+    if isinstance(time, str) and time != "enabled" and current_time - datetime.fromisoformat(time) < timedelta(minutes=2)
+]
+
+    join_times[guild_id].append(current_time.isoformat())
+
+    save_data_raid(join_times)
+
+    if len(join_times[guild_id]) > 5:
+        await trigger_raid_protection(member.guild, "Afflux massif de nouvelles adhésions.")
+        log_channel = member.guild.get_channel(1306346010917867591)
+        if log_channel:
+            await log_channel.send("🚨 Anti-Raid activé automatiquement.")
+
     welcome_channel = bot.get_channel(1272526126526369812)
     if welcome_channel is None:
         print("Erreur : Salon de bienvenue introuvable.")
@@ -1071,7 +1701,6 @@ async def on_member_join(member):
     role = member.guild.get_role(1272530966283554826)
     if role:
         await member.add_roles(role)
-
 
 def create_embed(title=None, description=None, color=discord.Color.gold()):
 	embed = discord.Embed(
