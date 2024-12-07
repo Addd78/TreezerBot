@@ -21,6 +21,7 @@ from datetime import datetime, timezone, timedelta
 log_channel_id = 1302716998983221298
 rankup_channel_id = 1302369087095046184
 ECONOMY_FILE = "economie.json"
+NOEL_FILE = "noel.json"
 TOTO = ''
 debug = True
 SERVER = True
@@ -41,7 +42,6 @@ bot = PersistentViewBot()
 @bot.command()
 async def sync(ctx):
     synced = await ctx.bot.tree.sync()
-    await bot.change_presence(status=discord.Status.dnd, activity=discord.Activity(type=discord.ActivityType.watching, name=f"the server"))
     await ctx.send(f"Synced {len(synced)} commands")
 
 tree = bot.tree
@@ -54,14 +54,10 @@ def run_bot(token=TOTO, debug=False):
 
 @bot.event
 async def on_ready():
-    try:
-        from bs4 import BeautifulSoup
-        print("BeautifulSoup est installé avec succès !")
-    except ModuleNotFoundError:
-        print("BeautifulSoup n'est pas installé.")
-
+    await bot.change_presence(status=discord.Status.dnd, activity=discord.Activity(type=discord.ActivityType.watching, name=f"twitch.tv/treezer_"))
     check_free_games.start()
     award_treezcoins_for_vc.start()
+    send_economy_file.start()
     check_temporary_roles.start()
     bot.loop.create_task(start_drops())
     print(f'Connecté en tant que {bot.user}!')
@@ -85,16 +81,16 @@ def save_game_state(data):
 
 def load_data_noel():
     try:
-        with open("noel.json", "r") as file:
+        with open(NOEL_FILE, "r") as file:
             return json.load(file)
     except FileNotFoundError:
         return {}
 
 def save_data_noel(data):
-    with open("noel.json", "w") as file:
+    with open(NOEL_FILE, "w") as file:
         json.dump(data, file, indent=4)
 
-data = load_data_noel()
+
 
 def get_emoji(name):
     return emojis.get(name, '')
@@ -111,14 +107,29 @@ def save_ticket_data(file, data):
         json.dump(data, f, indent=4)
 
 def load_data_eco():
-    if os.path.exists(ECONOMY_FILE):
-        with open(ECONOMY_FILE, 'r') as file:
+    try:
+        with open("economie.json", "r") as file:
             return json.load(file)
-    return {}
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError:
+        return {}
 
-def save_data_eco(data):
-    with open(ECONOMY_FILE, 'w') as file:
-        json.dump(data, file, indent=4)
+
+def save_data_eco(updated_user_data):
+    try:
+        with open("economie.json", "r") as file:
+            all_data = json.load(file)
+    except FileNotFoundError:
+        all_data = {}
+    except json.JSONDecodeError:
+        all_data = {} 
+
+    all_data.update(updated_user_data)
+
+    with open("economie.json", "w") as file:
+        json.dump(all_data, file, indent=4)
+
 
 CONFIG_FILE = "state_raid.json"
 
@@ -731,6 +742,25 @@ async def update_follower_channels():
 
     
                   ################ ECONOMIE ####################
+        
+@bot.tree.command(name="manual_backup", description="Envoie une sauvegarde manuelle du fichier économie dans un salon.")
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def manual_backup(interaction: discord.Interaction):
+    try:
+        file_path = "economie.json"  
+        with open(file_path, "rb") as file:
+            channel = bot.get_channel(1312760681610739733)
+
+            if channel:
+                await channel.send(content="Voici la sauvegarde actuelle du fichier économie :", file=discord.File(file, "economie.json"))
+                await interaction.response.send_message("Le fichier `economie.json` a été envoyé dans le salon spécifié.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Erreur : Le salon n'a pas été trouvé.", ephemeral=True)
+    except FileNotFoundError:
+        await interaction.response.send_message("Erreur : Le fichier `economie.json` est introuvable.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Erreur inattendue : {e}", ephemeral=True)
+        
 					########### DROP ###################
 
 DROP_CHANNEL_ID = 1303428340866093146
@@ -774,8 +804,7 @@ class Drop(discord.ui.View):
 
         self.winners.append(user_id)
 
-        with open(ECONOMY_FILE, 'r') as f:
-            economie = json.load(f)
+        economie=load_data_eco()
 
         previous_balance = economie.get(user_id, {}).get("coins", 0)
         if user_id in economie:
@@ -884,6 +913,9 @@ message_counts = {}
 @bot.event
 async def on_message(message):
     await bot.process_commands(message)
+    ignored_channels = [1272533485030080583, 1272534627583655946]
+    if message.channel.id in ignored_channels:
+        return
 
     if message.author.bot:
         return 
@@ -1202,37 +1234,38 @@ async def treezinfo(interaction: discord.Interaction, member: discord.Member):
 
 REWARDS = {
     1: {"xp": 1000},
-    2: {"treezcoins": 1000},
+    2: {"coins": 1000},
     3: {"xp": 200},
-    4: {"treezcoins": 1000},
+    4: {"coins": 1000},
     5: {"roles": [1307457111445344377]},
     6: {"xp": 300},
-    7: {"treezcoins": 1250},
+    7: {"coins": 1250},
     8: {"xp": 300},
-    9: {"treezcoins": 1250},
-    10: {"xp": 500, "treezcoins": 2500},
+    9: {"coins": 1250},
+    10: {"xp": 500, "coins": 2500},
     11: {"xp": 400},
-    12: {"treezcoins": 1500},
+    12: {"coins": 1500},
     13: {"xp": 400},
-    14: {"treezcoins": 500},
+    14: {"coins": 500},
     15: {"chance_roles": {1305203860117258361: 20}, "roles": [1307457581203066932]},
     16: {"xp": 500},
-    17: {"treezcoins": 2000},
+    17: {"coins": 2000},
     18: {"xp": 500},
-    19: {"treezcoins": 2000},
-    20: {"xp": 1000, "treezcoins": 3000, "roles": [1307458296101212180]},
+    19: {"coins": 2000},
+    20: {"xp": 1000, "coins": 3000, "roles": [1307458296101212180]},
     21: {"xp": 600},
-    22: {"treezcoins": 2500},
+    22: {"coins": 2500},
     23: {"xp": 600},
-    24: {"treezcoins": 2500},
-    25: {"xp": 2000, "treezcoins": 5000, "chance_roles": {1305202855267012648: 10}, "roles": [1307458521335468153]}
+    24: {"coins": 2500},
+    25: {"xp": 2000, "coins": 5000, "chance_roles": {1305202855267012648: 10}, "roles": [1307458521335468153]}
 }
-
 async def handle_rewards(member: discord.Member, day: int):
-    if str(member.id) not in data:
-        data[str(member.id)] = {"claimed": [], "xp": 0, "treezcoins": 0, "level": 1}
+    data_noel = load_data_noel()
+    
+    if str(member.id) not in data_noel:
+        data_noel[str(member.id)] = {"claimed": [], "xp": 0, "coins": 0, "level": 1}
 
-    if day in data[str(member.id)]["claimed"]:
+    if day in data_noel[str(member.id)]["claimed"]:
         embed = discord.Embed(
             description=f"🎄 Vous avez déjà récupéré la récompense pour le jour {day}.",
             color=discord.Color.red()
@@ -1248,19 +1281,20 @@ async def handle_rewards(member: discord.Member, day: int):
         return embed
 
     reward = REWARDS.get(day, {})
-    response_message = f"🎁 **Récompense du jour {day}** 🎁\n"
+    response_message = ""
 
-    user_data = load_data_eco().get(str(member.id), {"xp": 0, "level": 1})
-    
+    all_economy_data = load_data_eco()
+    user_data = all_economy_data.get(str(member.id), {"xp": 0, "coins": 0, "level": 1})
+
     if "xp" in reward:
         xp = reward["xp"]
         user_data["xp"] += xp
         response_message += f"🧠 +{xp} XP\n"
 
-    if "treezcoins" in reward:
-        coins = reward["treezcoins"]
-        user_data["treezcoins"] = user_data.get("treezcoins", 0) + coins
-        response_message += f"💰 +{coins} Treezcoins\n"
+    if "coins" in reward:
+        coins = reward["coins"]
+        user_data["coins"] = user_data.get("coins", 0) + coins
+        response_message += f"💰 +{coins} coins\n"
 
     if "roles" in reward:
         for role_id in reward["roles"]:
@@ -1281,22 +1315,51 @@ async def handle_rewards(member: discord.Member, day: int):
 
     await update_level(member, user_data)
 
-    data[str(member.id)]["claimed"].append(day)
-    save_data_noel(data)
-    save_data_eco(user_data)
+    data_noel[str(member.id)]["claimed"].append(day)
+    save_data_noel(data_noel)
 
-    embed = discord.Embed(description=response_message, color=discord.Color.green())
+    all_economy_data[str(member.id)] = user_data
+    save_data_eco(all_economy_data)
+
+    log_channel = member.guild.get_channel(1312761589312520233)
+    if log_channel:
+        await log_channel.send(
+            f"🎁 {member.name} ({member.id}) a récupéré sa récompense pour le jour {day} !"
+        )
+
+    reward_list = ""
+    if "xp" in reward:
+        reward_list += f"🧠 {reward['xp']} XP\n"
+    if "coins" in reward:
+        reward_list += f"💰 {reward['coins']} coins\n"
+    if "roles" in reward:
+        for role_id in reward["roles"]:
+            role = member.guild.get_role(role_id)
+            if role:
+                reward_list += f"📜 Rôle : {role.name}\n"
+    if "chance_roles" in reward:
+        for role_id, chance in reward["chance_roles"].items():
+            role = member.guild.get_role(role_id)
+            if role:
+                reward_list += f"🍀 Rôle spécial : {role.name} ({chance}% de chance)\n"
+
+    embed = discord.Embed(
+        title=f"🎁 **Récompense du jour {day}** 🎁",
+        description=f"Voici votre récompense pour aujourd'hui :\n\n{reward_list}\n{response_message}",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text=f"Récompense récupérée à {datetime.utcnow().strftime('%H:%M:%S')} UTC")
     return embed
+
+
 
 class AdventCalendarView(View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(AdventButton())  # Ajoute le bouton principal
-
+        self.add_item(AdventButton())
 
 class AdventButton(Button):
     def __init__(self):
-
         super().__init__(
             label="Récupérer la récompense",
             style=ButtonStyle.red,
@@ -1304,17 +1367,11 @@ class AdventButton(Button):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        # Chargement des données
         day = datetime.utcnow().day
         member = interaction.user
         data = load_data_noel()
         economy_data = load_data_eco()
-        
-        # Initialiser les données de l'utilisateur si elles n'existent pas
-        if str(member.id) not in economy_data:
-            economy_data[str(member.id)] = {"xp": 0, "treezcoins": 0, "level": 1}
 
-        # Vérifier si la récompense a déjà été récupérée
         if str(member.id) in data and day in data[str(member.id)]["claimed"]:
             await interaction.response.send_message(
                 embed=Embed(
@@ -1324,8 +1381,6 @@ class AdventButton(Button):
                 ephemeral=True
             )
             return
-
-        # Vérifier si le jour actuel a une récompense
         if day not in REWARDS:
             await interaction.response.send_message(
                 embed=Embed(
@@ -1335,8 +1390,6 @@ class AdventButton(Button):
                 ephemeral=True
             )
             return
-
-        # Appliquer les récompenses
         reward_embed = await handle_rewards(member, day)
         await interaction.response.send_message(embed=reward_embed, ephemeral=True)
 
@@ -1368,6 +1421,18 @@ async def on_interaction(interaction: discord.Interaction):
         current_day = datetime.utcnow().day
         reward_embed = await handle_rewards(interaction.user, current_day)
         await interaction.response.send_message(embed=reward_embed, ephemeral=True)
+
+###################### BACK - UP ##########################
+
+@tasks.loop(hours=1)
+async def send_economy_file():
+    channel = bot.get_channel(1312760681610739733)
+    if channel:
+        await channel.send("📂 Voici le fichier `economie.json` :", file=discord.File("economie.json"))
+
+@send_economy_file.before_loop
+async def before_send_economy_file():
+    await bot.wait_until_ready()
 
 ############ VOCAUX TEMPO ##############
 
